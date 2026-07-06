@@ -147,13 +147,14 @@ th {
 
 .brand-mark {
   display: grid;
-  width: 42px;
-  height: 42px;
+  width: 56px;
+  height: 52px;
   place-items: center;
   border-radius: 8px;
-  background: #eab308;
-  color: #101918;
+  background: #8b35d6;
+  color: #000;
   font-weight: 800;
+  font-size: 13px;
 }
 
 .brand span:not(.brand-mark),
@@ -494,6 +495,99 @@ th {
   font-weight: 750;
 }
 
+.section-title.compact {
+  margin-bottom: 10px;
+  font-size: 14px;
+}
+
+.discount-buttons,
+.payment-button-grid,
+.quick-cash-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.discount-buttons {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.payment-button-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.quick-cash-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.ghost.selected,
+.payment-choice.selected {
+  border-color: #16a34a;
+  background: #16a34a;
+  color: #fff;
+}
+
+.pay-total {
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f0f4f7;
+  padding: 12px;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.pay-total span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.pay-total strong {
+  font-size: 28px;
+}
+
+.change-box {
+  display: grid;
+  gap: 2px;
+  place-items: center;
+  border-radius: 8px;
+  background: #16b83e;
+  color: #fff;
+  padding: 12px;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.change-box span {
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.change-box strong {
+  font-size: 28px;
+}
+
+.checkout-button {
+  min-height: 48px;
+  background: #0f8b8d;
+  font-size: 18px;
+}
+
+.checkout-button:hover {
+  background: #0b7072;
+}
+
+.summary-lines.tight {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.danger-text {
+  color: #dc2626;
+}
+
 .closure-summary,
 .payment-breakdown {
   display: grid;
@@ -653,6 +747,12 @@ th {
   .form-grid,
   .form-grid.compact {
     grid-template-columns: 1fr;
+  }
+
+  .discount-buttons,
+  .payment-button-grid,
+  .quick-cash-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .span-2,

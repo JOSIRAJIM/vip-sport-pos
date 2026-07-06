@@ -14,6 +14,7 @@ const navItems = [
   { id: "inventory", label: "Inventario", title: "Inventario", kicker: "Productos", roles: ["admin", "supervisor", "inventario"] },
   { id: "customers", label: "Clientes", title: "Clientes", kicker: "CRM", roles: ["admin", "supervisor", "cajero"] },
   { id: "discounts", label: "Descuentos", title: "Descuentos", kicker: "Reglas", roles: ["admin", "supervisor"] },
+  { id: "payment-methods", label: "Formas de pago", title: "Formas de pago", kicker: "Parametros", roles: ["admin", "supervisor"] },
   { id: "taxes", label: "Impuestos", title: "Impuestos", kicker: "Parametros", roles: ["admin", "supervisor"] },
   { id: "returns", label: "Devoluciones", title: "Devoluciones y NC", kicker: "Postventa", roles: ["admin", "supervisor", "cajero"] },
   { id: "reports", label: "Reportes", title: "Reporte diario", kicker: "Ventas", roles: ["admin", "supervisor"] },
@@ -70,6 +71,8 @@ const customerForm = reactive(emptyCustomer());
 const editingCustomerId = ref(null);
 const discountForm = reactive(emptyDiscount());
 const editingDiscountId = ref(null);
+const paymentMethodForm = reactive(emptyPaymentMethod());
+const editingPaymentMethodId = ref(null);
 const taxForm = reactive(emptyTax());
 const editingTaxId = ref(null);
 const returnReceiptSearch = ref("");
@@ -97,7 +100,18 @@ const taxTotal = computed(() => 0);
 const saleTotal = computed(() => roundMoney(cartTotal.value - discountTotal.value + taxTotal.value));
 const paidTotal = computed(() => roundMoney(payments.value.reduce((sum, payment) => sum + Number(payment.amount || 0), 0)));
 const balance = computed(() => roundMoney(saleTotal.value - paidTotal.value));
-const canCompleteSale = computed(() => currentShift.value && cart.value.length > 0 && Math.round(balance.value * 100) === 0);
+const canCompleteSale = computed(() => currentShift.value && cart.value.length > 0 && Math.round(balance.value * 100) === 0 && cashTenderedOk.value);
+const paymentMethodById = computed(() => new Map(paymentMethods.value.map((method) => [Number(method.id), method])));
+const activePaymentMethod = computed(() => paymentMethodById.value.get(Number(payments.value[0]?.payment_method_id)) || null);
+const activePaymentRequiresReference = computed(() => Boolean(activePaymentMethod.value?.requires_reference));
+const cashReceived = ref(0);
+const quickCashAmounts = computed(() => {
+  const total = Math.max(0, saleTotal.value);
+  const bases = [10000, 20000, 50000, 100000];
+  return [...new Set([total, ...bases].filter((amount) => amount > 0))];
+});
+const cashChange = computed(() => roundMoney(Math.max(0, Number(cashReceived.value || 0) - saleTotal.value)));
+const cashTenderedOk = computed(() => activePaymentMethod.value?.code !== "cash" || Number(cashReceived.value || 0) >= saleTotal.value);
 const lowStockProducts = computed(() => products.value.filter((product) => product.low_stock).slice(0, 8));
 const canManageUsers = computed(() => user.value?.role === "admin");
 const canSeeSupervisorViews = computed(() => ["admin", "supervisor"].includes(user.value?.role));
@@ -164,6 +178,15 @@ function emptyDiscount() {
     min_subtotal: 0,
     starts_at: "",
     ends_at: "",
+    is_active: "1"
+  };
+}
+
+function emptyPaymentMethod() {
+  return {
+    code: "",
+    name: "",
+    requires_reference: "0",
     is_active: "1"
   };
 }
@@ -276,6 +299,7 @@ async function loadView() {
   if (activeView.value === "inventory") await loadInventory();
   if (activeView.value === "customers") await loadCustomers();
   if (activeView.value === "discounts") await loadDiscounts();
+  if (activeView.value === "payment-methods") await loadPaymentMethods();
   if (activeView.value === "taxes") await loadTaxes();
   if (activeView.value === "returns") await loadReturns();
   if (activeView.value === "reports") await loadReports();
@@ -450,10 +474,21 @@ function removeCart(index) {
   if (payments.value.length <= 1) setSinglePaymentToTotal();
 }
 
-function setSinglePaymentToTotal() {
-  const method = paymentMethods.value.find((item) => item.code === "cash") || paymentMethods.value[0];
+function setSinglePaymentToTotal(methodId = null) {
+  const currentMethod = methodId
+    ? paymentMethods.value.find((item) => Number(item.id) === Number(methodId))
+    : paymentMethodById.value.get(Number(payments.value[0]?.payment_method_id));
+  const method = currentMethod || paymentMethods.value.find((item) => item.code === "cash") || paymentMethods.value[0];
   if (!method) return;
-  payments.value = [{ payment_method_id: method.id, amount: saleTotal.value, reference: "" }];
+  const reference = Number(payments.value[0]?.payment_method_id) === Number(method.id) ? payments.value[0]?.reference || "" : "";
+  payments.value = [{ payment_method_id: method.id, amount: saleTotal.value, reference }];
+  if (method.code === "cash" && Number(cashReceived.value || 0) < saleTotal.value) {
+    cashReceived.value = saleTotal.value;
+  }
+}
+
+function selectPaymentMethod(method) {
+  setSinglePaymentToTotal(method.id);
 }
 
 function addPayment() {
@@ -464,6 +499,15 @@ function addPayment() {
 
 function removePayment(index) {
   payments.value.splice(index, 1);
+}
+
+function selectDiscount(discountId) {
+  selectedDiscountId.value = discountId || "";
+  setSinglePaymentToTotal();
+}
+
+function setCashReceived(amount) {
+  cashReceived.value = amount;
 }
 
 async function openShiftFromPos() {
@@ -478,6 +522,7 @@ async function openShiftFromPos() {
 function resetSaleState() {
   cart.value = [];
   payments.value = [];
+  cashReceived.value = 0;
   customerName.value = "";
   selectedCustomerId.value = "";
   selectedDiscountId.value = "";
@@ -574,7 +619,7 @@ function buildReceiptHtml(sale) {
 <body>
   <div class="toolbar"><button type="button" onclick="window.print()">Imprimir</button></div>
   <main class="receipt">
-    <h3>SPORT STORE</h3>
+    <h3>VIP SPORT</h3>
     <div class="row"><span>Tirilla</span><span>${escapeHtml(sale.receipt_number)}</span></div>
     <div class="row"><span>Fecha</span><span>${escapeHtml(new Date(sale.created_at).toLocaleString())}</span></div>
     <div class="row"><span>Cajero</span><span>${escapeHtml(sale.cashier_name)}</span></div>
@@ -769,6 +814,45 @@ async function saveDiscount() {
   });
 }
 
+async function loadPaymentMethods() {
+  const result = await api("/payment-methods?active=all");
+  paymentMethods.value = result.payment_methods;
+}
+
+function editPaymentMethod(method) {
+  editingPaymentMethodId.value = method.id;
+  Object.assign(paymentMethodForm, {
+    code: method.code || "",
+    name: method.name || "",
+    requires_reference: method.requires_reference ? "1" : "0",
+    is_active: method.is_active ? "1" : "0"
+  });
+}
+
+function clearPaymentMethodForm() {
+  editingPaymentMethodId.value = null;
+  Object.assign(paymentMethodForm, emptyPaymentMethod());
+}
+
+async function savePaymentMethod() {
+  await guarded(async () => {
+    const body = {
+      ...paymentMethodForm,
+      requires_reference: paymentMethodForm.requires_reference === "1",
+      is_active: paymentMethodForm.is_active === "1"
+    };
+    if (editingPaymentMethodId.value) {
+      await api(`/payment-methods/${editingPaymentMethodId.value}`, { method: "PUT", body });
+      notify("Forma de pago actualizada.");
+    } else {
+      await api("/payment-methods", { method: "POST", body });
+      notify("Forma de pago creada.");
+    }
+    clearPaymentMethodForm();
+    await loadPaymentMethods();
+  });
+}
+
 async function loadTaxes() {
   const result = await api("/taxes");
   taxes.value = result.taxes;
@@ -952,7 +1036,7 @@ onMounted(async () => {
   <section v-if="!user" class="login-screen">
     <form class="login-panel" @submit.prevent="login">
       <div>
-        <p class="eyebrow">Sport Store</p>
+        <p class="eyebrow">Vip Sport</p>
         <h1>POS e inventario</h1>
       </div>
       <label>
@@ -971,9 +1055,9 @@ onMounted(async () => {
   <section v-else class="app-shell">
     <aside class="sidebar">
       <div class="brand">
-        <span class="brand-mark">SS</span>
+        <span class="brand-mark">Sport</span>
         <div>
-          <strong>Sport Store</strong>
+          <strong>Vip Sport</strong>
           <span>POS</span>
         </div>
       </div>
@@ -1193,45 +1277,71 @@ onMounted(async () => {
               </section>
 
               <section class="panel">
-                <div class="panel-header"><h3>Pago</h3></div>
+                <div class="panel-header"><h3>Resumen y Pago</h3></div>
                 <div class="panel-body grid">
-                  <label>Descuento
-                    <select v-model="selectedDiscountId" @change="setSinglePaymentToTotal">
-                      <option value="">Sin descuento</option>
-                      <option v-for="discount in discounts" :key="discount.id" :value="discount.id">
-                        {{ discount.code }} - {{ discount.name }}
-                      </option>
-                    </select>
-                  </label>
-
-                  <div class="payment-list">
-                    <div v-for="(payment, index) in payments" :key="index" class="payment-row">
-                      <div class="form-grid compact">
-                        <label>Forma
-                          <select v-model.number="payment.payment_method_id">
-                            <option v-for="method in paymentMethods" :key="method.id" :value="method.id">{{ method.name }}</option>
-                          </select>
-                        </label>
-                        <label>Valor
-                          <input v-model.number="payment.amount" type="number" min="0" step="100">
-                        </label>
-                        <label>Referencia
-                          <input v-model.trim="payment.reference">
-                        </label>
-                      </div>
-                      <div><button class="ghost mini" type="button" @click="removePayment(index)">Eliminar pago</button></div>
+                  <div>
+                    <h3 class="section-title compact">Codigo de Cupon o Descuento General:</h3>
+                    <div class="discount-buttons">
+                      <button class="ghost" type="button" :class="{ selected: !selectedDiscountId }" @click="selectDiscount('')">Sin descuento</button>
+                      <button
+                        v-for="discount in discounts"
+                        :key="discount.id"
+                        class="ghost"
+                        type="button"
+                        :class="{ selected: Number(selectedDiscountId) === Number(discount.id) }"
+                        @click="selectDiscount(discount.id)"
+                      >
+                        {{ discount.discount_type === "PERCENT" ? `${discount.value}%` : formatMoney(discount.value) }}
+                      </button>
                     </div>
                   </div>
 
-                  <div class="actions">
-                    <button class="ghost" type="button" @click="addPayment">Agregar pago</button>
-                    <button class="ghost" type="button" @click="setSinglePaymentToTotal">Igualar total</button>
+                  <div class="summary-lines tight">
+                    <div><span>Subtotal:</span><span>{{ formatMoney(cartTotal) }}</span></div>
+                    <div><span>Descuento:</span><span class="danger-text">-{{ formatMoney(discountTotal) }}</span></div>
                   </div>
+
+                  <div class="pay-total">
+                    <span>Total a pagar</span>
+                    <strong>{{ formatMoney(saleTotal) }}</strong>
+                  </div>
+
+                  <div class="payment-button-grid">
+                    <button
+                      v-for="method in paymentMethods"
+                      :key="method.id"
+                      class="ghost payment-choice"
+                      type="button"
+                      :class="{ selected: Number(payments[0]?.payment_method_id) === Number(method.id) }"
+                      @click="selectPaymentMethod(method)"
+                    >
+                      {{ method.name }}
+                    </button>
+                  </div>
+
+                  <label v-if="activePaymentRequiresReference && payments[0]">Referencia
+                    <input v-model.trim="payments[0].reference" placeholder="Numero, comprobante o nota credito">
+                  </label>
+
+                  <label v-if="activePaymentMethod?.code === 'cash'">Recibido (Efectivo):
+                    <input v-model.number="cashReceived" type="number" min="0" step="100">
+                  </label>
+                  <div v-if="activePaymentMethod?.code === 'cash'" class="quick-cash-grid">
+                    <button v-for="amount in quickCashAmounts" :key="amount" class="ghost mini" type="button" @click="setCashReceived(amount)">
+                      {{ formatMoney(amount) }}
+                    </button>
+                  </div>
+                  <div v-if="activePaymentMethod?.code === 'cash'" class="change-box">
+                    <span>Cambio a entregar (vueltos)</span>
+                    <strong>{{ formatMoney(cashChange) }}</strong>
+                  </div>
+
                   <div class="summary-lines">
-                    <div><span>Pagado</span><span>{{ formatMoney(paidTotal) }}</span></div>
+                    <div><span>Pagado registrado</span><span>{{ formatMoney(paidTotal) }}</span></div>
                     <div><span>Saldo</span><span>{{ formatMoney(balance) }}</span></div>
                   </div>
-                  <button class="primary full" type="button" :disabled="!canCompleteSale || loading" @click="completeSale">Finalizar venta</button>
+                  <button class="primary full checkout-button" type="button" :disabled="!canCompleteSale || loading" @click="completeSale">Finalizar venta</button>
+                  <p class="hint center">Verifica productos y montos antes de finalizar</p>
                 </div>
               </section>
             </section>
@@ -1418,6 +1528,55 @@ onMounted(async () => {
                     <td>{{ formatMoney(discount.min_subtotal) }}</td>
                     <td><span class="status-pill" :class="{ bad: !discount.is_active }">{{ discount.is_active ? "Activo" : "Inactivo" }}</span></td>
                     <td><button class="ghost mini" type="button" @click="editDiscount(discount)">Editar</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </template>
+
+        <template v-else-if="activeView === 'payment-methods'">
+          <section class="panel">
+            <div class="panel-header">
+              <h3>{{ editingPaymentMethodId ? "Editar forma de pago" : "Nueva forma de pago" }}</h3>
+              <button v-if="editingPaymentMethodId" class="ghost" type="button" @click="clearPaymentMethodForm">Cancelar</button>
+            </div>
+            <div class="panel-body">
+              <form class="form-grid compact" @submit.prevent="savePaymentMethod">
+                <label>Codigo<input v-model.trim="paymentMethodForm.code" placeholder="ej: efectivo, nequi" required></label>
+                <label>Nombre<input v-model.trim="paymentMethodForm.name" placeholder="Nombre visible" required></label>
+                <label>Referencia
+                  <select v-model="paymentMethodForm.requires_reference">
+                    <option value="0">No requiere</option>
+                    <option value="1">Requiere</option>
+                  </select>
+                </label>
+                <label>Estado
+                  <select v-model="paymentMethodForm.is_active">
+                    <option value="1">Activo</option>
+                    <option value="0">Inactivo</option>
+                  </select>
+                </label>
+                <div class="span-4 actions">
+                  <button class="primary" type="submit">{{ editingPaymentMethodId ? "Guardar forma de pago" : "Crear forma de pago" }}</button>
+                </div>
+              </form>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header"><h3>Formas de pago parametrizadas</h3></div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Codigo</th><th>Nombre</th><th>Referencia</th><th>Estado</th><th></th></tr></thead>
+                <tbody>
+                  <tr v-if="!paymentMethods.length"><td colspan="5" class="muted">Sin formas de pago.</td></tr>
+                  <tr v-for="method in paymentMethods" :key="method.id">
+                    <td>{{ method.code }}</td>
+                    <td>{{ method.name }}</td>
+                    <td>{{ method.requires_reference ? "Requiere" : "No requiere" }}</td>
+                    <td><span class="status-pill" :class="{ bad: !method.is_active }">{{ method.is_active ? "Activo" : "Inactivo" }}</span></td>
+                    <td><button class="ghost mini" type="button" @click="editPaymentMethod(method)">Editar</button></td>
                   </tr>
                 </tbody>
               </table>
@@ -1778,7 +1937,7 @@ onMounted(async () => {
 
   <dialog class="receipt-dialog" :open="Boolean(receipt)">
     <div v-if="receipt" id="receiptPrint" class="receipt">
-      <h3>SPORT STORE</h3>
+      <h3>VIP SPORT</h3>
       <div class="row"><span>Tirilla</span><span>{{ receipt.receipt_number }}</span></div>
       <div class="row"><span>Fecha</span><span>{{ new Date(receipt.created_at).toLocaleString() }}</span></div>
       <div class="row"><span>Cajero</span><span>{{ receipt.cashier_name }}</span></div>
