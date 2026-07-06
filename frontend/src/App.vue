@@ -1223,6 +1223,37 @@ onMounted(async () => {
         <template v-else-if="activeView === 'pos'">
           <section class="pos-layout">
             <div class="pos-left-stack">
+              <section class="panel pos-customer-panel">
+                <div class="panel-header"><h3>Cliente</h3></div>
+                <div class="panel-body grid">
+                  <form class="toolbar" @submit.prevent="searchPos">
+                    <label>Buscar cliente
+                      <input v-model.trim="customerSearch" placeholder="Documento, nombre o telefono">
+                    </label>
+                    <button class="ghost" type="submit">Buscar</button>
+                  </form>
+                  <label>Cliente registrado
+                    <select v-model="selectedCustomerId">
+                      <option value="">Sin cliente registrado</option>
+                      <option v-for="customer in customers" :key="customer.id" :value="customer.id">
+                        {{ customer.full_name }} {{ customer.document_number ? `- ${customer.document_number}` : "" }}
+                      </option>
+                    </select>
+                  </label>
+                  <div class="form-grid compact readonly-customer">
+                    <label>Documento
+                      <input :value="selectedCustomerData.document" readonly>
+                    </label>
+                    <label>Nombre
+                      <input :value="selectedCustomerData.first_name" readonly>
+                    </label>
+                    <label>Apellido
+                      <input :value="selectedCustomerData.last_name" readonly>
+                    </label>
+                  </div>
+                </div>
+              </section>
+
               <section class="panel pos-sale-panel">
                 <div class="panel-header pos-sale-header">
                   <div>
@@ -1350,37 +1381,6 @@ onMounted(async () => {
             </div>
 
             <section class="grid two pos-checkout-grid">
-              <section class="panel">
-                <div class="panel-header"><h3>Cliente</h3></div>
-                <div class="panel-body grid">
-                  <form class="toolbar" @submit.prevent="searchPos">
-                    <label>Buscar cliente
-                      <input v-model.trim="customerSearch" placeholder="Documento, nombre o telefono">
-                    </label>
-                    <button class="ghost" type="submit">Buscar</button>
-                  </form>
-                  <label>Cliente registrado
-                    <select v-model="selectedCustomerId">
-                      <option value="">Sin cliente registrado</option>
-                      <option v-for="customer in customers" :key="customer.id" :value="customer.id">
-                        {{ customer.full_name }} {{ customer.document_number ? `- ${customer.document_number}` : "" }}
-                      </option>
-                    </select>
-                  </label>
-                  <div class="form-grid compact readonly-customer">
-                    <label>Documento
-                      <input :value="selectedCustomerData.document" readonly>
-                    </label>
-                    <label>Nombre
-                      <input :value="selectedCustomerData.first_name" readonly>
-                    </label>
-                    <label>Apellido
-                      <input :value="selectedCustomerData.last_name" readonly>
-                    </label>
-                  </div>
-                </div>
-              </section>
-
               <section class="panel">
                 <div class="panel-header"><h3>Resumen y Pago</h3></div>
                 <div class="panel-body grid">
