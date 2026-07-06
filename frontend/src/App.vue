@@ -97,21 +97,50 @@ const discountTotal = computed(() => {
   return roundMoney(Math.min(cartTotal.value, Number(discount.value || 0)));
 });
 const taxTotal = computed(() => 0);
-const saleTotal = computed(() => roundMoney(cartTotal.value - discountTotal.value + taxTotal.value));
+const saleBaseTotal = computed(() => roundMoney(cartTotal.value - discountTotal.value + taxTotal.value));
+const paymentMethodById = computed(() => new Map(paymentMethods.value.map((method) => [Number(method.id), method])));
+const cardSurchargeRate = 0.05;
+
+function isCardMethod(method) {
+  const code = String(method?.code || "").toLowerCase();
+  const name = String(method?.name || "").toLowerCase();
+  return code === "debit" || code === "credit" || code.includes("card") || code.includes("tarjeta") || name.includes("tarjeta");
+}
+
+function paymentMethodFor(payment) {
+  return paymentMethodById.value.get(Number(payment?.payment_method_id)) || null;
+}
+
+function paymentRequiresReference(payment) {
+  return Boolean(paymentMethodFor(payment)?.requires_reference);
+}
+
+function paymentMethodIsCash(payment) {
+  return paymentMethodFor(payment)?.code === "cash";
+}
+
+function hasPaymentMethod(method) {
+  return payments.value.some((payment) => Number(payment.payment_method_id) === Number(method.id));
+}
+
+const usesCardPayment = computed(() => payments.value.some((payment) => isCardMethod(paymentMethodFor(payment))));
+const cardSurchargeTotal = computed(() => usesCardPayment.value ? roundMoney(saleBaseTotal.value * cardSurchargeRate) : 0);
+const saleTotal = computed(() => roundMoney(saleBaseTotal.value + cardSurchargeTotal.value));
 const paidTotal = computed(() => roundMoney(payments.value.reduce((sum, payment) => sum + Number(payment.amount || 0), 0)));
 const balance = computed(() => roundMoney(saleTotal.value - paidTotal.value));
-const canCompleteSale = computed(() => currentShift.value && cart.value.length > 0 && Math.round(balance.value * 100) === 0 && cashTenderedOk.value);
-const paymentMethodById = computed(() => new Map(paymentMethods.value.map((method) => [Number(method.id), method])));
 const activePaymentMethod = computed(() => paymentMethodById.value.get(Number(payments.value[0]?.payment_method_id)) || null);
 const activePaymentRequiresReference = computed(() => Boolean(activePaymentMethod.value?.requires_reference));
+const cashPaymentsTotal = computed(() => roundMoney(payments.value.reduce((sum, payment) => paymentMethodIsCash(payment) ? sum + Number(payment.amount || 0) : sum, 0)));
 const cashReceived = ref(0);
 const quickCashAmounts = computed(() => {
-  const total = Math.max(0, saleTotal.value);
+  const total = Math.max(0, cashPaymentsTotal.value || saleTotal.value);
   const bases = [10000, 20000, 50000, 100000];
   return [...new Set([total, ...bases].filter((amount) => amount > 0))];
 });
-const cashChange = computed(() => roundMoney(Math.max(0, Number(cashReceived.value || 0) - saleTotal.value)));
-const cashTenderedOk = computed(() => activePaymentMethod.value?.code !== "cash" || Number(cashReceived.value || 0) >= saleTotal.value);
+const cashChange = computed(() => roundMoney(Math.max(0, Number(cashReceived.value || 0) - cashPaymentsTotal.value)));
+const cashTenderedOk = computed(() => cashPaymentsTotal.value <= 0 || Number(cashReceived.value || 0) >= cashPaymentsTotal.value);
+const canCompleteSale = computed(() => currentShift.value && cart.value.length > 0 && Math.round(balance.value * 100) === 0 && cashTenderedOk.value);
+const posProductResults = computed(() => (productSuggestions.value.length ? productSuggestions.value : products.value).slice(0, 8));
 const lowStockProducts = computed(() => products.value.filter((product) => product.low_stock).slice(0, 8));
 const canManageUsers = computed(() => user.value?.role === "admin");
 const canSeeSupervisorViews = computed(() => ["admin", "supervisor"].includes(user.value?.role));
@@ -325,12 +354,14 @@ async function loadProducts(search = "", active = "") {
 }
 
 async function loadPos() {
-  const [methodResult, shiftResult, customerResult, discountResult] = await Promise.all([
+  const [productResult, methodResult, shiftResult, customerResult, discountResult] = await Promise.all([
+    api("/products?limit=8"),
     api("/payment-methods"),
     api("/shifts/current"),
     api(`/customers?search=${encodeURIComponent(customerSearch.value)}`),
     api("/discounts?active=true")
   ]);
+  products.value = productResult.products;
   paymentMethods.value = methodResult.payment_methods;
   currentShift.value = shiftResult.shift;
   customers.value = customerResult.customers;
@@ -474,6 +505,33 @@ function removeCart(index) {
   if (payments.value.length <= 1) setSinglePaymentToTotal();
 }
 
+function remainingPaymentAmount(excludeIndex = null) {
+  const paid = payments.value.reduce((sum, payment, index) => (
+    index === excludeIndex ? sum : sum + Number(payment.amount || 0)
+  ), 0);
+  return roundMoney(Math.max(0, saleTotal.value - paid));
+}
+
+function ensureCashReceivedCoversCash() {
+  if (cashPaymentsTotal.value > 0 && Number(cashReceived.value || 0) < cashPaymentsTotal.value) {
+    cashReceived.value = cashPaymentsTotal.value;
+  }
+}
+
+function normalizePaymentsToTotal() {
+  if (!payments.value.length) {
+    setSinglePaymentToTotal();
+    return;
+  }
+  if (payments.value.length === 1) {
+    payments.value[0].amount = saleTotal.value;
+  } else {
+    const lastIndex = payments.value.length - 1;
+    payments.value[lastIndex].amount = roundMoney(Number(payments.value[lastIndex].amount || 0) + balance.value);
+  }
+  ensureCashReceivedCoversCash();
+}
+
 function setSinglePaymentToTotal(methodId = null) {
   const currentMethod = methodId
     ? paymentMethods.value.find((item) => Number(item.id) === Number(methodId))
@@ -482,28 +540,41 @@ function setSinglePaymentToTotal(methodId = null) {
   if (!method) return;
   const reference = Number(payments.value[0]?.payment_method_id) === Number(method.id) ? payments.value[0]?.reference || "" : "";
   payments.value = [{ payment_method_id: method.id, amount: saleTotal.value, reference }];
-  if (method.code === "cash" && Number(cashReceived.value || 0) < saleTotal.value) {
-    cashReceived.value = saleTotal.value;
-  }
+  ensureCashReceivedCoversCash();
 }
 
 function selectPaymentMethod(method) {
-  setSinglePaymentToTotal(method.id);
+  if (!payments.value.length || payments.value.length === 1) {
+    setSinglePaymentToTotal(method.id);
+    return;
+  }
+  addPayment(method.id);
 }
 
-function addPayment() {
-  const method = paymentMethods.value[0];
+function updatePaymentMethod(payment) {
+  payment.reference = "";
+  normalizePaymentsToTotal();
+}
+
+function addPayment(methodId = null) {
+  const method = methodId
+    ? paymentMethods.value.find((item) => Number(item.id) === Number(methodId))
+    : paymentMethods.value[0];
   if (!method) return;
   payments.value.push({ payment_method_id: method.id, amount: 0, reference: "" });
+  const index = payments.value.length - 1;
+  payments.value[index].amount = remainingPaymentAmount(index);
+  ensureCashReceivedCoversCash();
 }
 
 function removePayment(index) {
   payments.value.splice(index, 1);
+  normalizePaymentsToTotal();
 }
 
 function selectDiscount(discountId) {
   selectedDiscountId.value = discountId || "";
-  setSinglePaymentToTotal();
+  normalizePaymentsToTotal();
 }
 
 function setCashReceived(amount) {
@@ -1151,19 +1222,20 @@ onMounted(async () => {
 
         <template v-else-if="activeView === 'pos'">
           <section class="pos-layout">
-            <section class="panel pos-sale-panel">
-              <div class="panel-header pos-sale-header">
-                <div>
-                  <h3>Venta</h3>
-                  <p v-if="currentShift" class="muted">Turno #{{ currentShift.id }} abierto por {{ currentShift.opened_by_name }}</p>
-                  <p v-else class="muted">Abre un turno para empezar a vender.</p>
+            <div class="pos-left-stack">
+              <section class="panel pos-sale-panel">
+                <div class="panel-header pos-sale-header">
+                  <div>
+                    <h3>Carrito (Lista de productos)</h3>
+                    <p v-if="currentShift" class="muted">Turno #{{ currentShift.id }} abierto por {{ currentShift.opened_by_name }}</p>
+                    <p v-else class="muted">Abre un turno para empezar a vender.</p>
+                  </div>
+                  <div class="pos-sale-total">
+                    <span class="muted">Total a pagar</span>
+                    <strong>{{ formatMoney(saleTotal) }}</strong>
+                    <span class="status-pill" :class="{ warn: balance !== 0 }">{{ formatMoney(balance) }} saldo</span>
+                  </div>
                 </div>
-                <div class="pos-sale-total">
-                  <span class="muted">Total</span>
-                  <strong>{{ formatMoney(saleTotal) }}</strong>
-                  <span class="status-pill" :class="{ warn: balance !== 0 }">{{ formatMoney(balance) }} saldo</span>
-                </div>
-              </div>
 
               <div class="panel-body pos-sale-body">
                 <form v-if="!currentShift" class="toolbar shift-open-inline" @submit.prevent="openShiftFromPos">
@@ -1179,70 +1251,103 @@ onMounted(async () => {
                   <span>Efectivo esperado {{ formatMoney(currentShift.expected_cash) }}</span>
                 </div>
 
-                <div class="pos-search-box">
-                  <label>Buscar producto
-                    <input
-                      ref="productSearchInput"
-                      v-model.trim="posSearch"
-                      autocomplete="off"
-                      placeholder="Codigo de barras, SKU, referencia o producto"
-                      @input="queueProductSuggestions"
-                      @focus="queueProductSuggestions"
-                      @keydown.down.prevent="moveProductSuggestion(1)"
-                      @keydown.up.prevent="moveProductSuggestion(-1)"
-                      @keydown.enter.prevent="confirmProductSearch"
-                      @keydown.esc.prevent="clearProductSearch"
-                    >
-                  </label>
-                  <div v-if="posSearch" class="suggestion-panel" role="listbox">
-                    <p v-if="productSearchLoading" class="muted">Buscando...</p>
-                    <button
-                      v-for="(product, index) in productSuggestions"
-                      :key="product.id"
-                      type="button"
-                      class="suggestion-item"
-                      :class="{ active: index === productSuggestionIndex, disabled: product.stock <= 0 }"
-                      :disabled="product.stock <= 0"
-                      role="option"
-                      @mousedown.prevent="addProductFromSearch(product)"
-                    >
-                      <span>
-                        <strong>{{ product.name }}</strong>
-                        <small>{{ product.sku }} <template v-if="product.reference">/ Ref. {{ product.reference }}</template> <template v-if="product.barcode">/ {{ product.barcode }}</template></small>
-                      </span>
-                      <span>
-                        <strong>{{ formatMoney(product.price) }}</strong>
-                        <small>Stock {{ product.stock }}</small>
-                      </span>
-                    </button>
-                    <p v-if="!productSearchLoading && productSuggestionsQuery === posSearch && !productSuggestions.length" class="muted">Sin resultados.</p>
-                  </div>
+                <div class="table-wrap pos-cart-table-wrap">
+                  <table class="cart-table">
+                    <thead>
+                      <tr><th>SKU</th><th>Nombre</th><th>Cantidad</th><th>Precio</th><th>Extiende total</th><th></th></tr>
+                    </thead>
+                    <tbody>
+                      <tr v-if="!cart.length">
+                        <td colspan="6" class="muted">Carrito vacio.</td>
+                      </tr>
+                      <tr v-for="(item, index) in cart" :key="item.product.id">
+                        <td>
+                          <strong>{{ item.product.sku }}</strong>
+                          <p class="muted"><template v-if="item.product.reference">Ref. {{ item.product.reference }}</template></p>
+                        </td>
+                        <td>
+                          <strong>{{ item.product.name }}</strong>
+                          <p class="muted">{{ item.product.size || "" }} {{ item.product.color || "" }}</p>
+                        </td>
+                        <td>
+                          <div class="qty-stepper">
+                            <button class="ghost mini icon-btn" type="button" @click="decrementCart(index)">-</button>
+                            <strong>{{ item.quantity }}</strong>
+                            <button class="ghost mini icon-btn" type="button" @click="incrementCart(index)">+</button>
+                          </div>
+                        </td>
+                        <td>{{ formatMoney(item.product.price) }}</td>
+                        <td><strong>{{ formatMoney(Number(item.product.price) * item.quantity) }}</strong></td>
+                        <td><button class="danger mini icon-btn" type="button" @click="removeCart(index)">X</button></td>
+                      </tr>
+                    </tbody>
+                  </table>
                 </div>
 
-                <div class="cart-list pos-cart-list">
-                  <p v-if="!cart.length" class="muted">Carrito vacio.</p>
-                  <div v-for="(item, index) in cart" :key="item.product.id" class="cart-item">
-                    <div>
-                      <strong>{{ item.product.name }}</strong>
-                      <p class="muted">{{ item.product.sku }} <template v-if="item.product.reference">/ {{ item.product.reference }}</template> {{ item.product.size || "" }} {{ item.product.color || "" }}</p>
-                      <p>{{ formatMoney(item.product.price) }} x {{ item.quantity }}</p>
-                    </div>
-                    <div class="quantity-controls">
-                      <button class="ghost mini" type="button" @click="decrementCart(index)">-</button>
-                      <strong>{{ item.quantity }}</strong>
-                      <button class="ghost mini" type="button" @click="incrementCart(index)">+</button>
-                      <button class="danger mini" type="button" @click="removeCart(index)">Quitar</button>
-                    </div>
-                  </div>
-                </div>
-
-                <div class="summary-lines pos-summary">
-                  <div><span>Subtotal</span><span>{{ formatMoney(cartTotal) }}</span></div>
-                  <div v-if="discountTotal > 0"><span>Descuento</span><span>-{{ formatMoney(discountTotal) }}</span></div>
-                  <div v-if="taxTotal > 0"><span>Impuestos</span><span>{{ formatMoney(taxTotal) }}</span></div>
+                <div class="cart-subtotal">
+                  <span>Subtotal:</span>
+                  <strong>{{ formatMoney(cartTotal) }}</strong>
                 </div>
               </div>
             </section>
+
+              <section class="panel product-search-panel">
+                <div class="panel-header"><h3>Producto</h3></div>
+                <div class="panel-body">
+                  <div class="pos-search-box">
+                    <label>Buscar producto
+                      <input
+                        ref="productSearchInput"
+                        v-model.trim="posSearch"
+                        autocomplete="off"
+                        placeholder="Codigo de barras, SKU, referencia o producto"
+                        @input="queueProductSuggestions"
+                        @focus="queueProductSuggestions"
+                        @keydown.down.prevent="moveProductSuggestion(1)"
+                        @keydown.up.prevent="moveProductSuggestion(-1)"
+                        @keydown.enter.prevent="confirmProductSearch"
+                        @keydown.esc.prevent="clearProductSearch"
+                      >
+                    </label>
+                    <div v-if="posSearch" class="suggestion-panel" role="listbox">
+                      <p v-if="productSearchLoading" class="muted">Buscando...</p>
+                      <button
+                        v-for="(product, index) in productSuggestions"
+                        :key="product.id"
+                        type="button"
+                        class="suggestion-item"
+                        :class="{ active: index === productSuggestionIndex, disabled: product.stock <= 0 }"
+                        :disabled="product.stock <= 0"
+                        role="option"
+                        @mousedown.prevent="addProductFromSearch(product)"
+                      >
+                        <span>
+                          <strong>{{ product.name }}</strong>
+                          <small>{{ product.sku }} <template v-if="product.reference">/ Ref. {{ product.reference }}</template> <template v-if="product.barcode">/ {{ product.barcode }}</template></small>
+                        </span>
+                        <span>
+                          <strong>{{ formatMoney(product.price) }}</strong>
+                          <small>Stock {{ product.stock }}</small>
+                        </span>
+                      </button>
+                      <p v-if="!productSearchLoading && productSuggestionsQuery === posSearch && !productSuggestions.length" class="muted">Sin resultados.</p>
+                    </div>
+                  </div>
+                  <h3 class="section-title">Resultados de Busqueda</h3>
+                  <div class="product-card-grid">
+                    <article v-for="product in posProductResults" :key="product.id" class="product-card">
+                      <div class="product-thumb">{{ product.name.slice(0, 2).toUpperCase() }}</div>
+                      <div class="product-card-main">
+                        <strong>{{ product.name }}</strong>
+                        <span>{{ product.sku }} <template v-if="product.reference">/ {{ product.reference }}</template></span>
+                        <b>{{ formatMoney(product.price) }}</b>
+                      </div>
+                      <button class="ghost mini icon-btn" type="button" :disabled="product.stock <= 0" @click="addProductFromSearch(product)">+</button>
+                    </article>
+                  </div>
+                </div>
+              </section>
+            </div>
 
             <section class="grid two pos-checkout-grid">
               <section class="panel">
@@ -1299,6 +1404,7 @@ onMounted(async () => {
                   <div class="summary-lines tight">
                     <div><span>Subtotal:</span><span>{{ formatMoney(cartTotal) }}</span></div>
                     <div><span>Descuento:</span><span class="danger-text">-{{ formatMoney(discountTotal) }}</span></div>
+                    <div v-if="cardSurchargeTotal > 0"><span>Recargo tarjeta 5%:</span><span>{{ formatMoney(cardSurchargeTotal) }}</span></div>
                   </div>
 
                   <div class="pay-total">
@@ -1312,26 +1418,42 @@ onMounted(async () => {
                       :key="method.id"
                       class="ghost payment-choice"
                       type="button"
-                      :class="{ selected: Number(payments[0]?.payment_method_id) === Number(method.id) }"
+                      :class="{ selected: hasPaymentMethod(method) }"
                       @click="selectPaymentMethod(method)"
                     >
                       {{ method.name }}
                     </button>
                   </div>
 
-                  <label v-if="activePaymentRequiresReference && payments[0]">Referencia
-                    <input v-model.trim="payments[0].reference" placeholder="Numero, comprobante o nota credito">
-                  </label>
+                  <div class="payment-list mixed-payment-list">
+                    <div v-for="(payment, index) in payments" :key="index" class="payment-row">
+                      <div class="form-grid compact">
+                        <label>Forma
+                          <select v-model.number="payment.payment_method_id" @change="updatePaymentMethod(payment)">
+                            <option v-for="method in paymentMethods" :key="method.id" :value="method.id">{{ method.name }}</option>
+                          </select>
+                        </label>
+                        <label>Valor
+                          <input v-model.number="payment.amount" type="number" min="0" step="100">
+                        </label>
+                        <label v-if="paymentRequiresReference(payment)">Referencia
+                          <input v-model.trim="payment.reference" placeholder="Numero o comprobante">
+                        </label>
+                      </div>
+                      <button class="ghost mini" type="button" :disabled="payments.length <= 1" @click="removePayment(index)">Eliminar pago</button>
+                    </div>
+                  </div>
+                  <button class="ghost" type="button" @click="addPayment()">Agregar otra forma de pago</button>
 
-                  <label v-if="activePaymentMethod?.code === 'cash'">Recibido (Efectivo):
+                  <label v-if="cashPaymentsTotal > 0">Recibido (Efectivo):
                     <input v-model.number="cashReceived" type="number" min="0" step="100">
                   </label>
-                  <div v-if="activePaymentMethod?.code === 'cash'" class="quick-cash-grid">
+                  <div v-if="cashPaymentsTotal > 0" class="quick-cash-grid">
                     <button v-for="amount in quickCashAmounts" :key="amount" class="ghost mini" type="button" @click="setCashReceived(amount)">
                       {{ formatMoney(amount) }}
                     </button>
                   </div>
-                  <div v-if="activePaymentMethod?.code === 'cash'" class="change-box">
+                  <div v-if="cashPaymentsTotal > 0" class="change-box">
                     <span>Cambio a entregar (vueltos)</span>
                     <strong>{{ formatMoney(cashChange) }}</strong>
                   </div>

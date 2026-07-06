@@ -84,6 +84,12 @@ function nullableDateTime(value) {
   return normalized.length === 16 ? `${normalized}:00` : normalized;
 }
 
+function isCardPaymentMethod(method) {
+  const code = String(method?.code || "").toLowerCase();
+  const name = String(method?.name || "").toLowerCase();
+  return code === "debit" || code === "credit" || code.includes("card") || code.includes("tarjeta") || name.includes("tarjeta");
+}
+
 function mapUser(row) {
   return {
     id: row.id,
@@ -1128,14 +1134,15 @@ app.post("/api/sales", authRequired, requireRoles("supervisor", "cajero"), async
 
     const discountCents = calculateDiscountCents(subtotalCents, discount);
     const taxCents = 0;
-    const totalCents = subtotalCents - discountCents + taxCents;
-    if (totalCents <= 0) {
+    const baseTotalCents = subtotalCents - discountCents + taxCents;
+    if (baseTotalCents <= 0) {
       throw httpError(400, "El total de la venta debe ser mayor a cero.");
     }
 
     const paymentRows = [];
     let paymentCents = 0;
     let creditNoteCents = 0;
+    let usesCardPayment = false;
     const usedCreditNoteIds = new Set();
 
     for (const payment of paymentsInput) {
@@ -1155,6 +1162,9 @@ app.post("/api/sales", authRequired, requireRoles("supervisor", "cajero"), async
       }
       if (method.requires_reference && !nullableText(payment.reference)) {
         throw httpError(400, `La forma de pago ${method.name} requiere referencia.`);
+      }
+      if (isCardPaymentMethod(method)) {
+        usesCardPayment = true;
       }
 
       let creditNote = null;
@@ -1194,6 +1204,9 @@ app.post("/api/sales", authRequired, requireRoles("supervisor", "cajero"), async
         creditNote
       });
     }
+
+    const cardSurchargeCents = usesCardPayment ? Math.round(baseTotalCents * 0.05) : 0;
+    const totalCents = baseTotalCents + cardSurchargeCents;
 
     if (creditNoteCents > totalCents) {
       throw httpError(400, "La venta debe ser de igual o mayor valor que la nota credito.");
