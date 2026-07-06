@@ -266,10 +266,10 @@ th {
   gap: 10px;
 }
 
-.grid {
+/*.grid {
   display: grid;
   gap: 16px;
-}
+}*/
 
 .grid.two {
   grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr);
