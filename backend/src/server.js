@@ -84,6 +84,12 @@ function nullableDateTime(value) {
   return normalized.length === 16 ? `${normalized}:00` : normalized;
 }
 
+function isCardPaymentMethod(method) {
+  const code = String(method?.code || "").toLowerCase();
+  const name = String(method?.name || "").toLowerCase();
+  return code === "debit" || code === "credit" || code.includes("card") || code.includes("tarjeta") || name.includes("tarjeta");
+}
+
 function mapUser(row) {
   return {
     id: row.id,
@@ -396,10 +402,89 @@ app.get("/api/categories", authRequired, asyncHandler(async (req, res) => {
 }));
 
 app.get("/api/payment-methods", authRequired, asyncHandler(async (req, res) => {
+  const activeFilter = req.query.active;
+  const params = [];
+  let sql = "SELECT id, code, name, requires_reference, is_active FROM payment_methods";
+  if (activeFilter !== "all") {
+    sql += " WHERE is_active = 1";
+  }
+  sql += " ORDER BY id";
   const [rows] = await pool.query(
-    "SELECT id, code, name, requires_reference FROM payment_methods WHERE is_active = 1 ORDER BY id"
+    sql,
+    params
   );
-  res.json({ payment_methods: rows.map((row) => ({ ...row, requires_reference: Boolean(row.requires_reference) })) });
+  res.json({
+    payment_methods: rows.map((row) => ({
+      ...row,
+      requires_reference: Boolean(row.requires_reference),
+      is_active: Boolean(row.is_active)
+    }))
+  });
+}));
+
+app.post("/api/payment-methods", authRequired, requireRoles("supervisor"), asyncHandler(async (req, res) => {
+  const code = String(req.body.code || "").trim().toLowerCase().replace(/\s+/g, "_");
+  const name = String(req.body.name || "").trim();
+  if (!code || !name) {
+    throw httpError(400, "Codigo y nombre de la forma de pago son obligatorios.");
+  }
+  if (!/^[a-z0-9_-]+$/.test(code)) {
+    throw httpError(400, "El codigo solo puede tener letras, numeros, guion o guion bajo.");
+  }
+
+  const [result] = await pool.query(
+    "INSERT INTO payment_methods (code, name, requires_reference, is_active) VALUES (?, ?, ?, ?)",
+    [
+      code,
+      name,
+      req.body.requires_reference === true || req.body.requires_reference === 1 ? 1 : 0,
+      req.body.is_active === false || req.body.is_active === 0 ? 0 : 1
+    ]
+  );
+  const [rows] = await pool.query("SELECT * FROM payment_methods WHERE id = ?", [result.insertId]);
+  res.status(201).json({
+    payment_method: {
+      ...rows[0],
+      requires_reference: Boolean(rows[0].requires_reference),
+      is_active: Boolean(rows[0].is_active)
+    }
+  });
+}));
+
+app.put("/api/payment-methods/:id", authRequired, requireRoles("supervisor"), asyncHandler(async (req, res) => {
+  const methodId = toPositiveInt(req.params.id, "Forma de pago");
+  const code = String(req.body.code || "").trim().toLowerCase().replace(/\s+/g, "_");
+  const name = String(req.body.name || "").trim();
+  if (!code || !name) {
+    throw httpError(400, "Codigo y nombre de la forma de pago son obligatorios.");
+  }
+  if (!/^[a-z0-9_-]+$/.test(code)) {
+    throw httpError(400, "El codigo solo puede tener letras, numeros, guion o guion bajo.");
+  }
+
+  await pool.query(
+    `UPDATE payment_methods
+     SET code = ?, name = ?, requires_reference = ?, is_active = ?
+     WHERE id = ?`,
+    [
+      code,
+      name,
+      req.body.requires_reference === true || req.body.requires_reference === 1 ? 1 : 0,
+      req.body.is_active === false || req.body.is_active === 0 ? 0 : 1,
+      methodId
+    ]
+  );
+  const [rows] = await pool.query("SELECT * FROM payment_methods WHERE id = ?", [methodId]);
+  if (!rows[0]) {
+    throw httpError(404, "Forma de pago no encontrada.");
+  }
+  res.json({
+    payment_method: {
+      ...rows[0],
+      requires_reference: Boolean(rows[0].requires_reference),
+      is_active: Boolean(rows[0].is_active)
+    }
+  });
 }));
 
 app.get("/api/customers", authRequired, requireRoles("supervisor", "cajero"), asyncHandler(async (req, res) => {
@@ -1049,14 +1134,15 @@ app.post("/api/sales", authRequired, requireRoles("supervisor", "cajero"), async
 
     const discountCents = calculateDiscountCents(subtotalCents, discount);
     const taxCents = 0;
-    const totalCents = subtotalCents - discountCents + taxCents;
-    if (totalCents <= 0) {
+    const baseTotalCents = subtotalCents - discountCents + taxCents;
+    if (baseTotalCents <= 0) {
       throw httpError(400, "El total de la venta debe ser mayor a cero.");
     }
 
     const paymentRows = [];
     let paymentCents = 0;
     let creditNoteCents = 0;
+    let usesCardPayment = false;
     const usedCreditNoteIds = new Set();
 
     for (const payment of paymentsInput) {
@@ -1076,6 +1162,9 @@ app.post("/api/sales", authRequired, requireRoles("supervisor", "cajero"), async
       }
       if (method.requires_reference && !nullableText(payment.reference)) {
         throw httpError(400, `La forma de pago ${method.name} requiere referencia.`);
+      }
+      if (isCardPaymentMethod(method)) {
+        usesCardPayment = true;
       }
 
       let creditNote = null;
@@ -1115,6 +1204,9 @@ app.post("/api/sales", authRequired, requireRoles("supervisor", "cajero"), async
         creditNote
       });
     }
+
+    const cardSurchargeCents = usesCardPayment ? Math.round(baseTotalCents * 0.05) : 0;
+    const totalCents = baseTotalCents + cardSurchargeCents;
 
     if (creditNoteCents > totalCents) {
       throw httpError(400, "La venta debe ser de igual o mayor valor que la nota credito.");
@@ -1616,7 +1708,7 @@ app.use((error, req, res, next) => {
 waitForDatabase()
   .then(() => {
     app.listen(config.port, () => {
-      console.log(`Sport Store POS running on port ${config.port}`);
+      console.log(`Vip Sport POS running on port ${config.port}`);
     });
   })
   .catch((error) => {
